@@ -224,6 +224,22 @@ never touches data outside of them.
    `postinstall` and `npm run build`; you don't need to run
    `prisma generate` manually in a normal deploy.
 
+6. **Bootstrap the initial admin login.** `prisma/seed.ts` refuses to run
+   when `NODE_ENV=production` (by design — it also plants sample
+   farmers/buyers/crops, which production should never get). That means a
+   freshly migrated production database has **zero users**, and login will
+   always fail with "Invalid username or password" until you create one.
+   Run this once, with production `DATABASE_URL` in the environment:
+   ```bash
+   cd backend
+   ADMIN_EMAIL=owner@yourdomain.com ADMIN_PASSWORD='a-strong-generated-password' npm run create-admin
+   ```
+   Both variables are optional — omitted, they default to
+   `owner@agribusiness.local` / `ChangeMe123!` (the same as the dev seed).
+   If you use the default password, change it immediately after logging in.
+   Re-running this command later is safe — it upserts by email, so it just
+   resets that one user's password instead of creating a duplicate.
+
 ---
 
 ## 6. Production startup
