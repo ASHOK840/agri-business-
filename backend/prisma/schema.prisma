@@ -1,0 +1,1386 @@
+// Agri Business Management System — Prisma Schema
+// Module 2: Database Foundation
+//
+// This schema defines ONLY the core entities required for Module 2:
+// User, Farmer, Staff, Crop, Buyer, Warehouse.
+//
+// Business/purchase/sale/inventory tables are intentionally NOT included yet
+// and will be added in later modules, per the module-by-module build plan.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Prisma 6 is used deliberately (Prisma 7 requires driver adapters and a
+// separate prisma.config.ts file, and is still very new/less stable).
+// The DATABASE_URL is read directly from backend/.env here.
+
+// ---------------------------------------------------------------------------
+// ENUMS
+// ---------------------------------------------------------------------------
+
+// Three login roles: ADMIN (Father/Owner — full access, formerly named
+// OWNER), STAFF (simplified farmer/crop entry), and TRANSPORTATION
+// (simplified trip workflow, scoped to their own assigned TransportRecords
+// via TransportRecord.assignedUserId). The architecture (see docs) allows
+// this to evolve into a permissions table later without breaking existing
+// data, since the User.role column itself does not need to change shape —
+// only what values it may hold.
+enum UserRole {
+  ADMIN
+  STAFF
+  TRANSPORTATION
+}
+
+// Generic active/inactive status used across master-data entities.
+// Using an enum (rather than a boolean) leaves room for a future
+// "SUSPENDED" or similar status without a schema-breaking change.
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum SaleStatus {
+  PENDING
+  CONFIRMED
+  LOADED
+  DISPATCHED
+  DELIVERED
+  CANCELLED
+}
+
+// ---------------------------------------------------------------------------
+// USER
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         UserRole @default(STAFF)
+
+  // Lets Admin deactivate a Staff/Transportation login without deleting
+  // it (preserves all of that user's historical records/attributions).
+  // A deactivated user cannot log in — see auth.service.ts.
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Every CropPrice record is attributed to whoever recorded it — an
+  // audit trail for a field that directly affects negotiation history.
+  recordedCropPrices CropPrice[]
+
+  // Every Purchase is attributed to whoever created the record.
+  recordedPurchases Purchase[]
+
+  // Every WeighingRecord is attributed to whoever recorded it.
+  recordedWeighings WeighingRecord[]
+
+  // Every TransportRecord is attributed to whoever created it.
+  recordedTransports TransportRecord[]
+
+  // Every InventoryTransaction is attributed to whoever recorded it.
+  recordedInventoryTransactions InventoryTransaction[]
+
+  // TransportRecords assigned to this user (TRANSPORTATION role logins
+  // only see/act on trips assigned to them here — see TransportRecord).
+  assignedTransportRecords TransportRecord[] @relation("TransportAssignedUser")
+
+  // Every QualityRecord is attributed to the authorized user who
+  // recorded the quality decision.
+  assessedQualityRecords QualityRecord[]
+
+  // Every Sale is attributed to whoever created the record.
+  recordedSales Sale[]
+
+  // Every SaleSettlement is attributed to whoever recorded the buyer's
+  // final weight and settlement figures.
+  recordedSaleSettlements SaleSettlement[]
+
+  // Every BuyerPayment is attributed to whoever recorded it.
+  recordedBuyerPayments     BuyerPayment[]
+  recordedTransportPayments TransportPayment[]
+  recordedStaffPayments     StaffPayment[]
+
+  // Every Expense is attributed to whoever created it, and — separately
+  // — whoever cancelled it, if it was.
+  createdExpenses   Expense[] @relation("ExpenseCreatedBy")
+  cancelledExpenses Expense[] @relation("ExpenseCancelledBy")
+
+  // Every GeneratedDocument records who generated it.
+  generatedDocuments GeneratedDocument[]
+
+  // Every AuditLog entry records who performed the action.
+  auditLogs AuditLog[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// FARMER
+// ---------------------------------------------------------------------------
+
+model Farmer {
+  id         String       @id @default(uuid())
+  farmerCode String       @unique
+  name       String
+  phone      String?
+  address    String?
+  village    String?
+  status     RecordStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  purchases Purchase[]
+
+  @@map("farmers")
+}
+
+// ---------------------------------------------------------------------------
+// STAFF
+// ---------------------------------------------------------------------------
+
+// Staff represents field-operations employees. Kept intentionally minimal
+// for now — job assignments, bags handled, labour rate, and labour
+// earnings are NOT columns here, since those are transactional/computed
+// data, not static attributes of a staff member. They will live in future
+// tables (e.g. StaffAssignment, LabourRecord) with a foreign key back to
+// Staff.id, keeping this table stable as those modules get built:
+//   StaffAssignment { id, staffId -> Staff.id, purchaseId, assignedAt, ... }
+//   LabourRecord     { id, staffId -> Staff.id, bagsHandled, ratePerBag, amount, ... }
+model Staff {
+  id        String       @id @default(uuid())
+  staffCode String       @unique
+  name      String
+  phone     String?
+  status    RecordStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assignments   StaffAssignment[]
+  staffPayments StaffPayment[]
+
+  @@map("staff")
+}
+
+// ---------------------------------------------------------------------------
+// CROP
+// ---------------------------------------------------------------------------
+
+model Crop {
+  id       String @id @default(uuid())
+  cropCode String @unique
+  name     String
+
+  // Configurable bag weight per crop (typically 42 kg, but never hard-coded
+  // in application logic — always read from this field).
+  // Stored with precision suitable for kilograms, e.g. 42.000.
+  defaultBagWeightKg Decimal @default(42) @db.Decimal(6, 3)
+
+  status RecordStatus @default(ACTIVE)
+
+  // Optional — when set, the frontend shows a low-stock warning once
+  // current calculated stock for this crop falls below this level.
+  // Nullable because not every crop needs a threshold configured.
+  lowStockThresholdKg Decimal? @db.Decimal(10, 3)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Historical market/quote prices for this crop over time. See CropPrice
+  // below — these are reference prices, never the actual transaction
+  // price of a specific purchase or sale.
+  cropPrices CropPrice[]
+
+  purchases Purchase[]
+
+  sales Sale[]
+
+  transportRecords TransportRecord[]
+
+  inventoryTransactions InventoryTransaction[]
+
+  @@map("crops")
+}
+
+// ---------------------------------------------------------------------------
+// BUYER
+// ---------------------------------------------------------------------------
+
+// Buyer represents large companies the business sells crops to. Kept
+// minimal for now — sales, price history, pending amounts, and
+// transaction history are NOT columns here, since those are
+// transactional data living in their own tables with a foreign key back
+// to Buyer.id — see Sale and BuyerPayment below.
+model Buyer {
+  id            String       @id @default(uuid())
+  buyerCode     String       @unique
+  companyName   String
+  contactPerson String?
+  phone         String?
+  address       String?
+  status        RecordStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Buyer-specific price quotes recorded over time (see CropPrice).
+  cropPrices CropPrice[]
+
+  // Warehouse → Buyer transport records referencing this buyer.
+  transportRecords TransportRecord[]
+
+  // Buyer feedback/remarks on quality, when recorded (see QualityRecord).
+  qualityRecords QualityRecord[]
+
+  sales Sale[]
+
+  // Every payment this buyer has made against any of their sales — see
+  // BuyerPayment for "buyer payment history".
+  payments BuyerPayment[]
+
+  @@map("buyers")
+}
+
+// ---------------------------------------------------------------------------
+// CROP PRICE
+// ---------------------------------------------------------------------------
+
+// Reference/market price history — deliberately NOT a single "current
+// price" column on Crop, and deliberately separate from any transaction
+// (Purchase/Sale) price. Every price quote (market rate, buyer quote,
+// or a manually-noted reference) is its own immutable row.
+//
+// IMMUTABILITY IS THE POINT: there is no update or delete endpoint for
+// this entity. A correction is made by recording a NEW price row, never
+// by editing an old one — this preserves an honest history of what was
+// known/quoted at each point in time. When the future Purchases/Sales
+// modules are built, they will store their own negotiated price directly
+// on the transaction record, NOT a live reference to CropPrice, so that
+// historical transactions never change if a new market price is added
+// later.
+enum CropPriceType {
+  MARKET // A general market rate observed/reported, not tied to a specific buyer
+  BUYER_QUOTE // A rate specifically quoted by one buyer
+  MANUAL // A manually-entered reference note (e.g. from a phone call)
+}
+
+model CropPrice {
+  id String @id @default(uuid())
+
+  cropId String
+  crop   Crop   @relation(fields: [cropId], references: [id])
+
+  // Optional: set when this price is a quote from a specific buyer,
+  // rather than a general market observation.
+  buyerId String?
+  buyer   Buyer?  @relation(fields: [buyerId], references: [id])
+
+  // Free-text grade/quality descriptor (e.g. "Grade A", "Premium").
+  // Not an enum yet since grading standards vary by crop and aren't
+  // formalized until the future Quality module is built.
+  quality String?
+
+  // Stored in ₹ per kg, matching the business's base pricing unit.
+  pricePerKg Decimal @db.Decimal(10, 2)
+
+  // The date this price applies to/was observed — NOT necessarily the
+  // same as createdAt (a price can be logged after the fact).
+  effectiveDate DateTime
+
+  sourceType CropPriceType @default(MARKET)
+  notes      String?
+
+  createdBy     String
+  createdByUser User   @relation(fields: [createdBy], references: [id])
+
+  // No updatedAt — this row is never updated after creation.
+  createdAt DateTime @default(now())
+
+  // Speeds up the most common query: "latest price for this crop".
+  @@index([cropId, effectiveDate])
+  @@map("crop_prices")
+}
+
+// ---------------------------------------------------------------------------
+// PURCHASE
+// ---------------------------------------------------------------------------
+
+// Represents one crop-procurement transaction from a farmer, following
+// the business workflow: negotiate → farmer accepts → collection
+// approved → staff assigned (future module) → weighed → bagged →
+// transported to warehouse → recorded here.
+//
+// CRITICAL INTEGRITY RULE: purchaseRatePerKg, farmerId, and cropId are
+// FROZEN at creation and never change afterward. This is the actual
+// negotiated deal — it must stay exactly what was agreed on
+// purchaseDate regardless of how CropPrice market rates move later.
+// The update endpoint only ever touches fields that legitimately change
+// as the physical workflow progresses (quantity once weighed, bag count
+// once bagged, status, advance paid, notes) — never the deal terms.
+//
+// totalGrossAmount and remainingPayable are ALWAYS computed server-side
+// (actualQuantityKg, falling back to estimatedQuantityKg, × the frozen
+// rate; minus advanceAmount) — never accepted as direct client input,
+// so they can never drift out of sync with the underlying numbers.
+enum PurchaseStatus {
+  PENDING // Rate negotiated, not yet confirmed
+  CONFIRMED // Farmer accepted, collection approved
+  COLLECTED // Crop physically collected from farmer, weighed/bagged
+  AT_WAREHOUSE // Transported and received at the warehouse
+  COMPLETED // Fully recorded, ready for future settlement/inventory modules
+  CANCELLED // Deal fell through — record kept for history, never deleted
+}
+
+model Purchase {
+  id             String @id @default(uuid())
+  purchaseNumber String @unique
+
+  farmerId String
+  farmer   Farmer @relation(fields: [farmerId], references: [id])
+
+  cropId String
+  crop   Crop   @relation(fields: [cropId], references: [id])
+
+  quality String?
+
+  // FROZEN at creation. Never updatable afterward — see note above.
+  purchaseRatePerKg Decimal @db.Decimal(10, 2)
+
+  // Filled in progressively: estimated before collection, actual once
+  // the crop is physically weighed. Both nullable for that reason.
+  estimatedQuantityKg Decimal? @db.Decimal(10, 3)
+  actualQuantityKg    Decimal? @db.Decimal(10, 3)
+
+  numberOfBags Int?
+
+  // Copied from Crop.defaultBagWeightKg at creation time as a starting
+  // point, then becomes this purchase's own independent, editable value
+  // (e.g. if the actual bags used for this lot weigh differently).
+  bagWeightKg Decimal @db.Decimal(6, 3)
+
+  // Server-computed only — see the integrity note above.
+  totalGrossAmount Decimal @default(0) @db.Decimal(12, 2)
+  advanceAmount    Decimal @default(0) @db.Decimal(12, 2)
+  remainingPayable Decimal @default(0) @db.Decimal(12, 2)
+
+  purchaseDate DateTime
+  status       PurchaseStatus @default(PENDING)
+  notes        String?
+
+  createdBy     String
+  createdByUser User   @relation(fields: [createdBy], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One or more weighing events for this purchase — see WeighingRecord.
+  // Multiple rows are allowed (a re-weigh is a NEW record, never an edit
+  // of an old one), same immutable-history philosophy as CropPrice.
+  weighingRecords WeighingRecord[]
+
+  // Staff assigned to work on collecting/handling this purchase.
+  staffAssignments StaffAssignment[]
+
+  // Farmer → Warehouse transport records for this purchase.
+  transportRecords TransportRecord[]
+
+  // The inventory IN transaction automatically created when this
+  // purchase's crop arrives at the warehouse (see InventoryTransaction).
+  inventoryTransactions InventoryTransaction[]
+
+  // Quality assessments recorded for this purchase's crop.
+  qualityRecords QualityRecord[]
+
+  // Business expenses related to this purchase, when applicable — see
+  // Expense.
+  expenses Expense[]
+
+  // Farmer-side receipts generated for this purchase — see GeneratedDocument.
+  generatedDocuments GeneratedDocument[]
+
+  @@index([farmerId])
+  @@index([cropId])
+  @@index([status])
+  @@index([purchaseDate])
+  @@map("purchases")
+}
+
+// ---------------------------------------------------------------------------
+// STAFF ASSIGNMENT
+// ---------------------------------------------------------------------------
+
+// Links a staff member to a purchase's collection work, and tracks the
+// resulting labour payment. This is the table the Staff model's own
+// comment block predicted back when Staff was first created.
+//
+// UNLIKE WeighingRecord/CropPrice, this IS updatable — an assignment has
+// a real lifecycle (assigned → bags counted once work is done →
+// completed), similar to Purchase. Same terminal-state pattern as
+// Purchase applies: once COMPLETED or CANCELLED, no further edits.
+//
+// totalLabourAmount is ALWAYS computed server-side (bagsHandled ×
+// labourRatePerBag) — never accepted as direct client input, so it can
+// never drift out of sync. labourRatePerBag itself is a real field on
+// this record (never a hard-coded constant anywhere in the codebase),
+// entered per assignment so different jobs can have different rates.
+enum StaffAssignmentStatus {
+  ASSIGNED
+  COMPLETED
+  CANCELLED
+}
+
+model StaffAssignment {
+  id String @id @default(uuid())
+
+  purchaseId String
+  purchase   Purchase @relation(fields: [purchaseId], references: [id])
+
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  assignedDate DateTime
+
+  // Nullable — an assignment can exist before the work (and bag count)
+  // is actually done. Filled in as the job progresses.
+  bagsHandled Int?
+
+  // Configurable per assignment — e.g. ₹5/bag in the business's current
+  // example, but never hard-coded; a different job could use a
+  // different rate.
+  labourRatePerBag Decimal @db.Decimal(8, 2)
+
+  // Server-computed only: bagsHandled × labourRatePerBag (0 until bags
+  // are recorded).
+  totalLabourAmount Decimal @default(0) @db.Decimal(12, 2)
+
+  status StaffAssignmentStatus @default(ASSIGNED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments StaffPayment[]
+
+  @@index([purchaseId])
+  @@index([staffId])
+  @@index([status])
+  @@map("staff_assignments")
+}
+
+model StaffPayment {
+  id            String @id @default(uuid())
+  paymentNumber String @unique
+
+  assignmentId String
+  assignment   StaffAssignment @relation(fields: [assignmentId], references: [id])
+
+  // Denormalized from assignment.staffId at creation time so staff
+  // payment history can be queried directly without joining through
+  // StaffAssignment — the staff member on a given assignment never
+  // changes, so this never drifts.
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  amount Decimal @db.Decimal(12, 2)
+
+  paymentDate                DateTime
+  paymentMethod              PaymentMethod
+  transactionReferenceNumber String?
+  notes                      String?
+
+  recordedBy     String
+  recordedByUser User   @relation(fields: [recordedBy], references: [id])
+
+  // No updatedAt — immutable once recorded.
+  createdAt DateTime @default(now())
+
+  @@index([assignmentId])
+  @@index([staffId])
+  @@index([paymentDate])
+  @@map("staff_payments")
+}
+
+// ---------------------------------------------------------------------------
+// TRANSPORTATION
+// ---------------------------------------------------------------------------
+
+// Supports both directions the business pays for transport:
+//   FARMER_TO_WAREHOUSE — references a Purchase (collection from farmer)
+//   WAREHOUSE_TO_BUYER  — references a Buyer directly, since the Sale
+//                          entity doesn't exist yet. Once a Sales module
+//                          is built, this will gain a nullable saleId FK
+//                          alongside (not replacing) buyerId, the same
+//                          way Purchase's own future modules were
+//                          documented before being built.
+//
+// COST INDEPENDENCE (explicitly required): transportCost lives ONLY
+// here, never merged into Purchase.purchaseRatePerKg or
+// totalGrossAmount — there is no code path anywhere that reads this
+// value back into a Purchase calculation. This keeps transport as a
+// genuinely separate business expense, ready for a future
+// Expenses/Profit-Loss module to aggregate alongside labour and other
+// costs (see PREPARE note below) without ever having been double-counted
+// or silently folded into the crop's purchase price.
+//
+// PREPARE FOR PROFIT CALCULATION: this table doesn't compute profit
+// itself (out of scope for this module) — it just ensures transportCost
+// is stored as its own clean, attributable expense row (linked to a
+// purchase and/or crop) that a future Profit/Loss module can sum
+// directly, the same way StaffAssignment.totalLabourAmount is ready to
+// be summed as a labour cost.
+enum TransportDirection {
+  FARMER_TO_WAREHOUSE
+  WAREHOUSE_TO_BUYER
+}
+
+enum TransportStatus {
+  PENDING
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+}
+
+model Transporter {
+  id              String       @id @default(uuid())
+  transporterCode String       @unique
+  name            String
+  phone           String?
+  status          RecordStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transportRecords  TransportRecord[]
+  transportPayments TransportPayment[]
+
+  @@map("transporters")
+}
+
+model Driver {
+  id         String       @id @default(uuid())
+  driverCode String       @unique
+  name       String
+  phone      String?
+  status     RecordStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transportRecords TransportRecord[]
+
+  @@map("drivers")
+}
+
+model Vehicle {
+  id            String       @id @default(uuid())
+  // The vehicle's registration number IS its natural unique identifier
+  // — unlike Transporter/Driver, no separate auto-generated code is
+  // needed since real vehicle numbers are already unique in the world.
+  vehicleNumber String       @unique
+  vehicleType   String?
+  status        RecordStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transportRecords TransportRecord[]
+
+  @@map("vehicles")
+}
+
+model TransportRecord {
+  id String @id @default(uuid())
+
+  direction TransportDirection
+
+  transporterId String
+  transporter   Transporter @relation(fields: [transporterId], references: [id])
+
+  driverId String?
+  driver   Driver? @relation(fields: [driverId], references: [id])
+
+  vehicleId String?
+  vehicle   Vehicle? @relation(fields: [vehicleId], references: [id])
+
+  // Used for FARMER_TO_WAREHOUSE transports.
+  purchaseId String?
+  purchase   Purchase? @relation(fields: [purchaseId], references: [id])
+
+  // Used for WAREHOUSE_TO_BUYER transports (stand-in for a future
+  // Sale reference — see the model-level note above).
+  buyerId String?
+  buyer   Buyer?  @relation(fields: [buyerId], references: [id])
+
+  cropId String
+  crop   Crop   @relation(fields: [cropId], references: [id])
+
+  // Nullable — set by Admin to hand this trip to a specific TRANSPORTATION
+  // login so that user's simplified "My Trips" screen can filter to only
+  // their own assigned work. Existing records are unaffected (stay null)
+  // until an Admin assigns them. Distinct from Driver (field-operations
+  // master data) — this is a login account.
+  assignedUserId String?
+  assignedUser   User?   @relation("TransportAssignedUser", fields: [assignedUserId], references: [id])
+
+  fromLocation String
+  toLocation   String
+
+  numberOfBags Int?
+  weightKg     Decimal? @db.Decimal(10, 3)
+
+  // The business expense this whole module exists to record — always
+  // kept separate from Purchase's own amount fields (see note above).
+  transportCost Decimal @db.Decimal(10, 2)
+
+  transportDate DateTime
+  status        TransportStatus @default(PENDING)
+  notes         String?
+
+  createdBy     String
+  createdByUser User   @relation(fields: [createdBy], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments TransportPayment[]
+
+  @@index([purchaseId])
+  @@index([buyerId])
+  @@index([cropId])
+  @@index([status])
+  @@index([transportDate])
+  @@index([assignedUserId])
+  @@map("transport_records")
+}
+
+// Mirrors BuyerPayment, on the other side of the money flow: money the
+// business PAYS OUT to a transporter for a delivery, instead of money
+// it receives from a buyer. Unlike BuyerPayment there is no settlement
+// gate — TransportRecord.transportCost is known at creation time, so a
+// payment can be recorded from the moment the record exists. Outstanding
+// balance is never stored here either: it's always transportCost minus
+// the sum of payments recorded so far, computed live, same "never store
+// what can be computed" rule Inventory uses for stock.
+model TransportPayment {
+  id            String @id @default(uuid())
+  paymentNumber String @unique
+
+  transportRecordId String
+  transportRecord   TransportRecord @relation(fields: [transportRecordId], references: [id])
+
+  // Denormalized from transportRecord.transporterId at creation time so
+  // transport payment history can be queried directly without joining
+  // through TransportRecord — the transporter on a given record never
+  // changes, so this never drifts.
+  transporterId String
+  transporter   Transporter @relation(fields: [transporterId], references: [id])
+
+  amount Decimal @db.Decimal(12, 2)
+
+  paymentDate                DateTime
+  paymentMethod              PaymentMethod
+  transactionReferenceNumber String?
+  notes                      String?
+
+  recordedBy     String
+  recordedByUser User   @relation(fields: [recordedBy], references: [id])
+
+  // No updatedAt — immutable once recorded.
+  createdAt DateTime @default(now())
+
+  @@index([transportRecordId])
+  @@index([transporterId])
+  @@index([paymentDate])
+  @@map("transport_payments")
+}
+
+// ---------------------------------------------------------------------------
+// INVENTORY
+// ---------------------------------------------------------------------------
+
+// The entire point of this table: current stock is NEVER a stored,
+// manually-editable number anywhere in this system. It is always
+// calculated on read as SUM(IN) - SUM(OUT) + SUM(ADJUSTMENT) over these
+// immutable movement rows. There is no "currentStock" column on Crop or
+// Warehouse, and there never should be one.
+//
+// HOW EACH MOVEMENT TYPE GETS CREATED (this is the actual access-control
+// story, not just documentation):
+//   IN         — NEVER created directly via any API endpoint. The only
+//                way an IN row is created is automatically, by the
+//                Purchase service, when a purchase's status transitions
+//                to AT_WAREHOUSE. This is "do not allow normal users to
+//                manually overwrite calculated stock" enforced
+//                structurally: there is no POST route that lets anyone
+//                create an IN row by hand.
+//   OUT        — created via the dispatch endpoint (any logged-in user),
+//                representing crop leaving the warehouse for sale.
+//                BLOCKED if it would exceed currently available stock.
+//   ADJUSTMENT — created via the adjustment endpoint, OWNER only. This
+//                is the "authorized adjustment process" the requirements
+//                call for — it can bypass the availability check
+//                (needed to correct for spoilage, miscounts, etc.) and
+//                quantityKg may be negative here specifically, unlike
+//                IN/OUT which are always positive magnitudes.
+//
+// No update or delete endpoint exists for any movement — a correction
+// is always a new row (typically a new ADJUSTMENT), never an edit of
+// history, same philosophy as CropPrice and WeighingRecord.
+enum InventoryMovementType {
+  IN
+  OUT
+  ADJUSTMENT
+}
+
+model InventoryTransaction {
+  id String @id @default(uuid())
+
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  cropId String
+  crop   Crop   @relation(fields: [cropId], references: [id])
+
+  // Always a positive magnitude for IN/OUT. May be negative for
+  // ADJUSTMENT (e.g. -50 to record spoilage/shrinkage).
+  quantityKg   Decimal @db.Decimal(10, 3)
+  numberOfBags Int?
+
+  movementType InventoryMovementType
+
+  // A tag describing what caused this movement: 'PURCHASE' (automatic
+  // IN), 'DISPATCH' (manual OUT for a sale), 'ADJUSTMENT' (manual
+  // correction). Kept as a plain string rather than an enum so a
+  // future 'SALE' reference type can be added once the Sales module
+  // exists, without a schema migration.
+  referenceType String
+
+  // Points to the source record when applicable — e.g. Purchase.id for
+  // an automatic PURCHASE-triggered IN row. Nullable since a manual
+  // dispatch or adjustment may not reference any other specific row.
+  referenceId String?
+
+  // Only populated when referenceType = 'PURCHASE' — lets the UI join
+  // back to the originating purchase without a generic polymorphic
+  // lookup. Nullable for DISPATCH/ADJUSTMENT rows.
+  purchaseId String?
+  purchase   Purchase? @relation(fields: [purchaseId], references: [id])
+
+  movementDate DateTime
+  notes        String?
+
+  createdBy     String
+  createdByUser User   @relation(fields: [createdBy], references: [id])
+
+  // No updatedAt — immutable, see the note above.
+  createdAt DateTime @default(now())
+
+  @@index([warehouseId, cropId])
+  @@index([movementType])
+  @@index([referenceType, referenceId])
+  @@map("inventory_transactions")
+}
+
+// ---------------------------------------------------------------------------
+// CROP QUALITY
+// ---------------------------------------------------------------------------
+
+// QualityStatus is a MASTER-DATA TABLE, not a fixed enum — this is
+// deliberate. The requirements explicitly call for "make the quality
+// system configurable": the owner can add, rename, or deactivate
+// quality grades (beyond the default GOOD/MEDIUM/LOW/REJECTED) without
+// any code change or migration, the same way Crops or Buyers are
+// managed. Business logic that needs to know "does this status mean
+// the crop was rejected" checks the isRejection flag on the row, never
+// a hard-coded string comparison against a specific code — so even a
+// custom status the owner adds later (e.g. "SEVERELY_DAMAGED") can be
+// correctly treated as a rejection just by ticking that flag.
+model QualityStatus {
+  id           String       @id @default(uuid())
+  code         String       @unique
+  name         String
+  description  String?
+  // Flags that this status represents a rejection outcome. Checked by
+  // application logic instead of comparing against a specific code
+  // string, so the "REJECTED" behavior works even for a status the
+  // owner renames or adds later.
+  isRejection  Boolean      @default(false)
+  displayOrder Int          @default(0)
+  status       RecordStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  qualityRecords QualityRecord[]
+
+  @@map("quality_statuses")
+}
+
+// Records a quality assessment for a purchase's crop. This is the
+// FARMER/PURCHASE-SIDE assessment — buyerId and buyerRemarks capture a
+// specific buyer's feedback when it comes in, but there is no formal
+// Sale entity yet to attach a full buyer-side settlement to.
+//
+// PREPARED FOR FUTURE BUYER-SIDE QUALITY SETTLEMENT: once a Sales
+// module exists, a similar record shape will be used for the buyer's
+// own final quality check at delivery (referencing the future Sale
+// entity), following the same WeighingRecord/BuyerFinalWeight pattern
+// already established — kept as a separate future table rather than
+// overloading this one, since farmer-side assessment and buyer-side
+// settlement have different business meaning and timing.
+//
+// CRITICAL INTEGRITY RULE: priceAdjustment is recorded here as its own
+// value — it NEVER writes into Purchase.purchaseRatePerKg (which stays
+// frozen, per Module 10) or any other Purchase amount field. A future
+// Farmer Settlement module will read this adjustment alongside the
+// frozen purchase rate to compute the final payable amount, the same
+// way a future Profit/Loss module will read TransportRecord.
+// transportCost and StaffAssignment.totalLabourAmount as separate
+// costs — nothing here is silently folded into the purchase itself.
+//
+// "Do not automatically reject crops based on arbitrary rules" is
+// enforced by omission: there is no logic anywhere that inspects
+// moisturePercentage (or anything else) and auto-assigns a rejection
+// status. A human authorized user always chooses the qualityStatusId
+// explicitly — see the OWNER-only restriction on create/update below.
+model QualityRecord {
+  id String @id @default(uuid())
+
+  purchaseId String
+  purchase   Purchase @relation(fields: [purchaseId], references: [id])
+
+  // Set when this record reflects a specific buyer's feedback, rather
+  // than (or in addition to) the initial farmer-side assessment.
+  buyerId String?
+  buyer   Buyer?  @relation(fields: [buyerId], references: [id])
+
+  qualityStatusId String
+  qualityStatus   QualityStatus @relation(fields: [qualityStatusId], references: [id])
+
+  // A finer-grained label independent of the overall status (e.g.
+  // "Grade A"), matching the same free-text pattern used by
+  // CropPrice.quality and Purchase.quality.
+  grade String?
+
+  remarks            String?
+  moisturePercentage Decimal? @db.Decimal(5, 2)
+  buyerRemarks       String?
+
+  // Recorded separately from the frozen Purchase.purchaseRatePerKg —
+  // see the integrity note above. Can be negative (price reduced for
+  // poor quality) or, in principle, positive.
+  priceAdjustment Decimal? @db.Decimal(10, 2)
+
+  // Only meaningful (and required at the API layer) when
+  // qualityStatus.isRejection is true.
+  rejectionReason String?
+
+  assessedBy     String
+  assessedByUser User     @relation(fields: [assessedBy], references: [id])
+  assessmentDate DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([purchaseId])
+  @@index([buyerId])
+  @@index([qualityStatusId])
+  @@map("quality_records")
+}
+
+// ---------------------------------------------------------------------------
+// WEIGHING RECORD
+// ---------------------------------------------------------------------------
+
+// Records an actual weighing event during crop collection (farmer-side).
+// Like CropPrice, this is CREATE + READ ONLY — a re-weigh or correction
+// is recorded as a NEW row, never an edit of an old one, preserving an
+// honest history of what was measured at each point in time.
+//
+// PREPARED FOR FUTURE BUYER-SIDE WEIGHING: this table intentionally only
+// covers the farmer-collection side (referencing Purchase). A future
+// "final weighing" module for buyer-side acceptance will follow the same
+// shape (numberOfBags, standardBagWeightKg, expectedWeightKg,
+// actualWeightKg, weightDifferenceKg, recordedBy, notes) but as its own
+// table referencing the future Sale entity instead of Purchase — kept
+// separate rather than jammed into one table with a "side" flag, since
+// farmer-collection and buyer-acceptance have different business
+// meaning even though the math is identical.
+//
+// INTEGRITY: creating a weighing record never touches
+// Purchase.purchaseRatePerKg — the frozen rate is completely untouched.
+// It DOES sync Purchase.actualQuantityKg, numberOfBags, and bagWeightKg
+// to reflect what was actually weighed (recomputing totals using the
+// existing frozen rate), but only while the purchase is still active —
+// a COMPLETED or CANCELLED purchase is left alone even if a weighing
+// record is added to it for historical note-keeping.
+model WeighingRecord {
+  id String @id @default(uuid())
+
+  purchaseId String
+  purchase   Purchase @relation(fields: [purchaseId], references: [id])
+
+  numberOfBags Int
+
+  // The bag weight assumed for this specific weighing event — usually
+  // copied from the purchase's bagWeightKg, but recorded independently
+  // per weighing since the standard used can vary.
+  standardBagWeightKg Decimal @db.Decimal(6, 3)
+
+  // Computed: numberOfBags × standardBagWeightKg
+  expectedWeightKg Decimal @db.Decimal(10, 3)
+
+  // Measured on the actual scale.
+  actualWeightKg Decimal @db.Decimal(10, 3)
+
+  // Computed: actualWeightKg - expectedWeightKg (can be negative)
+  weightDifferenceKg Decimal @db.Decimal(10, 3)
+
+  weighingDate DateTime
+  notes        String?
+
+  recordedBy     String
+  recordedByUser User   @relation(fields: [recordedBy], references: [id])
+
+  // No updatedAt — this row is never updated after creation.
+  createdAt DateTime @default(now())
+
+  @@index([purchaseId, weighingDate])
+  @@map("weighing_records")
+}
+
+// ---------------------------------------------------------------------------
+// WAREHOUSE
+// ---------------------------------------------------------------------------
+
+model Warehouse {
+  id       String       @id @default(uuid())
+  name     String
+  location String?
+  status   RecordStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  inventoryTransactions InventoryTransaction[]
+  sales                 Sale[]
+
+  @@map("warehouses")
+}
+
+// ---------------------------------------------------------------------------
+// BUSINESS PROFILE
+// ---------------------------------------------------------------------------
+
+// Singleton table: the application always expects at most one row here.
+// The service layer enforces this (finds the existing row and updates it,
+// or creates the first one) rather than a database-level constraint, since
+// Prisma has no native "max one row" constraint for PostgreSQL.
+model Sale {
+  id               String     @id @default(uuid())
+  saleNumber       String     @unique
+  buyerId          String
+  buyer            Buyer      @relation(fields: [buyerId], references: [id])
+  cropId           String
+  crop             Crop       @relation(fields: [cropId], references: [id])
+  quality          String?
+  numberOfBags     Int?
+  dispatchWeightKg Decimal    @db.Decimal(10, 3)
+  sellingRatePerKg Decimal    @db.Decimal(10, 2)
+  expectedRevenue  Decimal    @db.Decimal(12, 2)
+  saleDate         DateTime
+  warehouseId      String
+  warehouse        Warehouse  @relation(fields: [warehouseId], references: [id])
+  status           SaleStatus @default(PENDING)
+  notes            String?
+
+  createdBy     String
+  createdByUser User   @relation(fields: [createdBy], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The buyer's final weight settlement, recorded once the truck reaches
+  // the buyer and they report the accepted weight. At most one per sale
+  // — see SaleSettlement below.
+  settlement SaleSettlement?
+
+  // Payments the buyer has made against this sale, once settled. Many
+  // per sale — full payment can arrive as several partial ones. See
+  // BuyerPayment below.
+  payments BuyerPayment[]
+
+  // Business expenses related to this sale, when applicable — see
+  // Expense.
+  expenses Expense[]
+
+  // Invoices generated for this sale — see GeneratedDocument.
+  generatedDocuments GeneratedDocument[]
+
+  @@index([buyerId])
+  @@index([cropId])
+  @@index([warehouseId])
+  @@index([status])
+  @@index([saleDate])
+  @@map("sales")
+}
+
+// The buyer's three possible outcomes on receiving a delivery (Module
+// 18): accept as agreed, accept at a reduced price, or reject outright.
+// Exactly one applies per settlement — see the conditional fields below.
+enum SaleSettlementStatus {
+  ACCEPTED
+  PRICE_ADJUSTED
+  REJECTED
+}
+
+// What physically happens to rejected goods. Only meaningful when
+// settlementStatus = REJECTED.
+enum RejectionAction {
+  RETURN_TO_WAREHOUSE
+  RESELL
+  DISPOSED_OTHER
+}
+
+// Records the buyer's final accepted weight once the truck arrives, and
+// the resulting settlement amount. Create + read ONLY, same philosophy as
+// WeighingRecord: a correction is a new adjustment note on this same row
+// only via adjustmentAmount/adjustmentReason at creation time — there is
+// no edit endpoint, and this NEVER writes back to the Sale record. The
+// Sale's dispatchWeightKg and sellingRatePerKg stay exactly what they
+// were when the deal was made; this row snapshots them alongside the
+// buyer's own figure purely for a self-contained historical record.
+model SaleSettlement {
+  id String @id @default(uuid())
+
+  saleId String @unique
+  sale   Sale   @relation(fields: [saleId], references: [id])
+
+  // Snapshot of the sale's dispatch weight and frozen selling rate (the
+  // ORIGINAL agreed rate) at settlement time — never read back onto the
+  // Sale row. See adjustedSellingRatePerKg below for the separate,
+  // buyer-negotiated rate used only when settlementStatus = PRICE_ADJUSTED.
+  dispatchWeightKg Decimal @db.Decimal(10, 3)
+  sellingRatePerKg Decimal @db.Decimal(10, 2)
+
+  // Reported by the buyer once their own scale weighs the delivery. For a
+  // full REJECTED settlement this is 0 — nothing was accepted.
+  buyerFinalWeightKg Decimal @db.Decimal(10, 3)
+
+  // Computed: buyerFinalWeightKg - dispatchWeightKg. Negative means the
+  // buyer received less than what was dispatched (e.g. -150 kg).
+  weightDifferenceKg Decimal @db.Decimal(10, 3)
+
+  // Computed: weightDifferenceKg / dispatchWeightKg * 100
+  differencePercentage Decimal @db.Decimal(6, 2)
+
+  settlementStatus SaleSettlementStatus @default(ACCEPTED)
+
+  // PRICE_ADJUSTED only: the buyer's negotiated reduced rate, kept
+  // entirely separate from sellingRatePerKg above for auditability — the
+  // original agreement is never overwritten, only sat alongside this.
+  // "authorized user" for this decision is recordedByUser below, gated
+  // OWNER-only at the service layer (a price change is financially
+  // significant, same rule as QualityRecord.priceAdjustment).
+  adjustedSellingRatePerKg Decimal? @db.Decimal(10, 2)
+  priceAdjustmentReason    String?
+
+  // REJECTED only.
+  rejectionReason      String?
+  quantityAffectedKg   Decimal?         @db.Decimal(10, 3)
+  rejectionAction      RejectionAction?
+  rejectionActionNotes String?
+
+  // General-purpose settlement adjustment for anything not covered by
+  // the structured PRICE_ADJUSTED rate above (e.g. a small flat
+  // deduction/bonus). Zero by default. See finalSettlementAmount.
+  adjustmentAmount Decimal @default(0) @db.Decimal(12, 2)
+  adjustmentReason String?
+
+  // Computed: (buyerFinalWeightKg × effective rate) + adjustmentAmount,
+  // where effective rate is adjustedSellingRatePerKg when
+  // settlementStatus = PRICE_ADJUSTED, else sellingRatePerKg.
+  finalSettlementAmount Decimal @db.Decimal(12, 2)
+
+  receivedDate DateTime
+  buyerRemarks String?
+
+  recordedBy     String
+  recordedByUser User   @relation(fields: [recordedBy], references: [id])
+
+  // No updatedAt — immutable once recorded.
+  createdAt DateTime @default(now())
+
+  @@index([saleId])
+  @@map("sale_settlements")
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  UPI
+  CHEQUE
+  OTHER
+}
+
+// Money the buyer pays the business AFTER a sale's delivery settlement
+// is finalized (see SaleSettlement — that record's finalSettlementAmount
+// is "the final sale amount" this module owes against). Create + read
+// ONLY: a correction is a new payment row (or a future reversal record),
+// never an edit of a past one — same philosophy as WeighingRecord and
+// SaleSettlement. This NEVER writes back to Sale or SaleSettlement; the
+// amount owed is always derived live as
+// finalSettlementAmount - SUM(BuyerPayment.amount for this sale), the
+// same "never store what can be computed" rule Inventory uses for stock.
+model BuyerPayment {
+  id            String @id @default(uuid())
+  paymentNumber String @unique
+
+  saleId String
+  sale   Sale   @relation(fields: [saleId], references: [id])
+
+  // Denormalized from sale.buyerId at creation time so buyer payment
+  // history can be queried directly without joining through Sale — the
+  // buyer on a given sale never changes, so this never drifts.
+  buyerId String
+  buyer   Buyer  @relation(fields: [buyerId], references: [id])
+
+  amount Decimal @db.Decimal(12, 2)
+
+  paymentDate                DateTime
+  paymentMethod              PaymentMethod
+  transactionReferenceNumber String?
+  notes                      String?
+
+  recordedBy     String
+  recordedByUser User   @relation(fields: [recordedBy], references: [id])
+
+  // No updatedAt — immutable once recorded.
+  createdAt DateTime @default(now())
+
+  // The receipt generated for this specific payment — see GeneratedDocument.
+  generatedDocument GeneratedDocument?
+
+  @@index([saleId])
+  @@index([buyerId])
+  @@index([paymentDate])
+  @@map("buyer_payments")
+}
+
+// ---------------------------------------------------------------------------
+// EXPENSES
+// ---------------------------------------------------------------------------
+
+// Configurable, same philosophy as QualityStatus/Crop/Buyer: the owner
+// can add, rename, or deactivate a category from the admin page, never a
+// code change. Seeded with sensible defaults (see seed.ts) covering the
+// categories the business already tracks elsewhere in detail —
+// Transportation and Labour — plus the ones that only ever live here:
+// Loading, Unloading, Warehouse, Miscellaneous.
+model ExpenseCategory {
+  id           String       @id @default(uuid())
+  code         String       @unique
+  name         String
+  description  String?
+  displayOrder Int          @default(0)
+  status       RecordStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expenses Expense[]
+
+  @@map("expense_categories")
+}
+
+enum ExpenseStatus {
+  ACTIVE
+  CANCELLED
+}
+
+// General business expense ledger (loading, unloading, warehouse,
+// misc., plus any ad-hoc transportation/labour cost not already covered
+// by TransportRecord/StaffAssignment — see the note on those two models
+// and on the expense summary calculation for how double-counting is
+// avoided: their costs are pulled live from TransportRecord.transportCost
+// and StaffAssignment.totalLabourAmount directly, never copied into this
+// table, so a figure is counted exactly once no matter which of the two
+// places it was recorded).
+//
+// Create + edit + cancel — NOT delete. A cancelled expense is kept for
+// audit history and excluded from the summary, same "never hard-delete a
+// financial record" rule as everywhere else in this app.
+model Expense {
+  id            String @id @default(uuid())
+  expenseNumber String @unique
+
+  categoryId String
+  category   ExpenseCategory @relation(fields: [categoryId], references: [id])
+
+  amount      Decimal  @db.Decimal(12, 2)
+  expenseDate DateTime
+  description String?
+
+  // At most one of these should be set (enforced at the API layer) —
+  // an optional link to the deal this expense relates to.
+  purchaseId String?
+  purchase   Purchase? @relation(fields: [purchaseId], references: [id])
+  saleId     String?
+  sale       Sale?     @relation(fields: [saleId], references: [id])
+
+  paymentMethod   PaymentMethod
+  referenceNumber String?
+
+  status             ExpenseStatus @default(ACTIVE)
+  cancelledAt        DateTime?
+  cancelledBy        String?
+  cancelledByUser    User?         @relation("ExpenseCancelledBy", fields: [cancelledBy], references: [id])
+  cancellationReason String?
+
+  createdBy     String
+  createdByUser User   @relation("ExpenseCreatedBy", fields: [createdBy], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([categoryId])
+  @@index([purchaseId])
+  @@index([saleId])
+  @@index([status])
+  @@index([expenseDate])
+  @@map("expenses")
+}
+
+model BusinessProfile {
+  id           String  @id @default(uuid())
+  businessName String
+  ownerName    String
+  phone        String?
+  address      String?
+
+  // PAN and GSTIN are business-identity fields that appear on official
+  // documents (receipts/invoices, built in a later module). GSTIN is
+  // optional because not every crop-trading business is GST-registered.
+  pan   String?
+  gstin String?
+  email String?
+
+  // Path/URL to an uploaded logo file. The file itself is stored on disk
+  // under backend/uploads/logos (see businessProfile.controller.ts) —
+  // only the reference is stored here.
+  logoUrl String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("business_profiles")
+}
+
+// ---------------------------------------------------------------------------
+// DOCUMENTS (receipts / invoices)
+// ---------------------------------------------------------------------------
+
+enum DocumentType {
+  FARMER_PURCHASE_RECEIPT
+  FARMER_PAYMENT_RECEIPT
+  BUYER_SALES_INVOICE
+  BUYER_PAYMENT_RECEIPT
+}
+
+// A lightweight numbering ledger — NOT a snapshot of the document's
+// content and NOT a place PDF bytes are ever stored. A document's actual
+// figures (amounts, weights, rates) are always assembled fresh from the
+// live source records at render/PDF-generation time, same "never store
+// what can be computed" rule used everywhere else in this app; the one
+// thing that MUST be persisted is the document number itself, so that
+// reprinting the same receipt/invoice always shows the same number
+// instead of minting a new one on every view.
+//
+// Exactly one of purchaseId/saleId/buyerPaymentId is set, matching
+// documentType. Farmer-side documents key off Purchase because there is
+// no separate farmer payment ledger (see the module note) — the receipt
+// reflects that purchase's current advance/balance. Buyer-side payment
+// receipts key off a specific BuyerPayment row, since that IS a proper
+// per-payment ledger (see Module 19).
+model GeneratedDocument {
+  id             String       @id @default(uuid())
+  documentNumber String       @unique
+  documentType   DocumentType
+
+  purchaseId String?
+  purchase   Purchase? @relation(fields: [purchaseId], references: [id])
+
+  saleId String?
+  sale   Sale?   @relation(fields: [saleId], references: [id])
+
+  // Unique alone (not just per documentType) — only BUYER_PAYMENT_RECEIPT
+  // ever sets this, so one payment can never have more than one receipt.
+  buyerPaymentId String?       @unique
+  buyerPayment   BuyerPayment? @relation(fields: [buyerPaymentId], references: [id])
+
+  generatedBy     String
+  generatedByUser User   @relation(fields: [generatedBy], references: [id])
+
+  // No updatedAt — a document number, once issued, never changes.
+  createdAt DateTime @default(now())
+
+  @@unique([documentType, purchaseId])
+  @@unique([documentType, saleId])
+  @@map("generated_documents")
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT LOG
+// ---------------------------------------------------------------------------
+
+// A record of important business changes — see audit.service.ts for the
+// exact list of instrumented actions. `action` and `entityType` are
+// plain strings, not enums, deliberately: this list is expected to grow,
+// and a new audited action should never require a schema migration —
+// same philosophy as InventoryTransaction.referenceType.
+//
+// oldValue/newValue are sanitized JSON snapshots (see
+// audit.service.ts's sanitizeForAudit) — never raw Prisma results, so a
+// field like a password hash can never end up here even if a future
+// audited entity happens to have one.
+//
+// Create-only: an audit trail that could itself be edited or deleted
+// defeats its own purpose, so no update/delete route exists for this
+// model anywhere in the app.
+model AuditLog {
+  id String @id @default(uuid())
+
+  userId    String
+  user      User   @relation(fields: [userId], references: [id])
+  // Denormalized snapshot of who acted, so the log stays meaningful even
+  // if the user's name/email is changed or the account is later removed.
+  userName  String
+  userEmail String
+
+  action     String
+  entityType String
+  entityId   String
+
+  oldValue Json?
+  newValue Json?
+
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

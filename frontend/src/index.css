@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Printable documents (receipts/invoices — see Module 23): hide the app
+   chrome and let the document itself fill the page cleanly. Also used as
+   the "Save as PDF" path via the browser's native print dialog until a
+   server-side PDF renderer consumes the same document data. */
+@media print {
+  header,
+  footer,
+  .no-print {
+    display: none !important;
+  }
+
+  body,
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+    background: white !important;
+  }
+}

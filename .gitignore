@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment files (never commit real secrets/config)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Prisma (generated client, added when database module is implemented)
+backend/src/generated/
+
+# Uploaded files (logos, etc.) — user-specific, not part of the codebase
+backend/uploads/*
+!backend/uploads/**/.gitkeep
+
+# Local database backups (see backend/scripts/backup-db.sh) — these
+# contain real business data and must never be committed.
+backend/backups/
